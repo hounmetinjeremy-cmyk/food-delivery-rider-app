@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MeGo Rider — Tableau de bord</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --txt:#e8ecf3; --muted:#8b95a7; --acc:#ff6b35; --ok:#2ecc71; --warn:#f1c40f; --off:#7f8c8d; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--txt); }
+  header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--off); }
+  .dot.on { background:var(--ok); }
+  .dot.err { background:#e74c3c; }
+  #status { font-size:13px; color:var(--muted); }
+  main { padding:24px; max-width:1100px; margin:0 auto; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:24px; }
+  .stat { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .stat b { display:block; font-size:26px; margin-top:6px; }
+  .stat span { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:20px; overflow-x:auto; }
+  section h2 { font-size:15px; margin:0 0 12px; }
+  table { width:100%; border-collapse:collapse; font-size:14px; }
+  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.05em; }
+  tr:last-child td { border-bottom:none; }
+  .badge { padding:3px 9px; border-radius:999px; font-size:12px; font-weight:600; }
+  .available { background:rgba(46,204,113,.15); color:var(--ok); }
+  .busy { background:rgba(241,196,15,.15); color:var(--warn); }
+  .offline { background:rgba(127,140,141,.2); color:var(--off); }
+  .pending { background:rgba(241,196,15,.15); color:var(--warn); }
+  .assigned, .in_transit { background:rgba(255,107,53,.15); color:var(--acc); }
+  .delivered { background:rgba(46,204,113,.15); color:var(--ok); }
+  select, button { background:#0f1115; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:13px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  .err { color:#e74c3c; font-size:13px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>MeGo Rider — Tableau de bord</h1>
+  <span id="status">connexion…</span>
+</header>
+<main>
+  <div class="stats">
+    <div class="stat"><span>Livreurs</span><b id="s-riders">–</b></div>
+    <div class="stat"><span>Commandes</span><b id="s-orders">–</b></div>
+    <div class="stat"><span>En cours</span><b id="s-active">–</b></div>
+    <div class="stat"><span>Disponibles</span><b id="s-avail">–</b></div>
+  </div>
+  <section>
+    <h2>Livreurs</h2>
+    <table><thead><tr><th>Nom</th><th>Téléphone</th><th>Statut</th><th>Note</th><th>Livraisons</th></tr></thead><tbody id="riders"></tbody></table>
+  </section>
+  <section>
+    <h2>Commandes</h2>
+    <table><thead><tr><th>Réf.</th><th>Client</th><th>Adresse</th><th>Total</th><th>Statut</th><th>Livreur</th><th></th></tr></thead><tbody id="orders"></tbody></table>
+  </section>
+  <p class="err" id="error"></p>
+</main>
+<script src="config.js"></script>
+<script>
+const cfg = window.RIDER_CONFIG || {};
+const base = (cfg.SUPABASE_URL || "").replace(/\/$/, "");
+const key = cfg.SUPABASE_KEY || "";
+const dot = document.getElementById("dot");
+const statusEl = document.getElementById("status");
+const errorEl = document.getElementById("error");
+let riders = [], orders = [];
+
+function setStatus(cls, text) { dot.className = "dot " + cls; statusEl.textContent = text; }
+
+async function api(path, options = {}) {
+  const res = await fetch(base + "/rest/v1/" + path, {
+    ...options,
+    headers: {
+      apikey: key,
+      Authorization: "Bearer " + key,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) throw new Error(res.status + " " + (await res.text()).slice(0, 200));
+  return res.status === 204 ? null : res.json();
+}
+
+const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const money = (n, cur) => new Intl.NumberFormat("fr-FR").format(Number(n) || 0) + " " + (cur || "XOF");
+
+function render() {
+  document.getElementById("s-riders").textContent = riders.length;
+  document.getElementById("s-orders").textContent = orders.length;
+  document.getElementById("s-active").textContent = orders.filter((o) => ["assigned", "in_transit"].includes(o.status)).length;
+  document.getElementById("s-avail").textContent = riders.filter((r) => r.status === "available").length;
+
+  document.getElementById("riders").innerHTML = riders.map((r) => `
+    <tr>
+      <td>${esc(r.name)}</td>
+      <td>${esc(r.phone)}</td>
+      <td><span class="badge ${esc(r.status)}">${esc(r.status)}</span></td>
+      <td>${esc(r.rating ?? "–")}</td>
+      <td>${esc(r.deliveries ?? 0)}</td>
+    </tr>`).join("") || `<tr><td colspan="5">Aucun livreur</td></tr>`;
+
+  document.getElementById("orders").innerHTML = orders.map((o) => {
+    const opts = riders.map((r) => `<option value="${esc(r.id)}"${r.id === o.rider_id ? " selected" : ""}>${esc(r.name)}</option>`).join("");
+    return `<tr>
+      <td>${esc(o.id)}</td>
+      <td>${esc(o.customer)}</td>
+      <td>${esc(o.address)}</td>
+      <td>${money(o.total, o.currency)}</td>
+      <td><span class="badge ${esc(o.status)}">${esc(o.status)}</span></td>
+      <td><select data-order="${esc(o.id)}"><option value="">—</option>${opts}</select></td>
+      <td><button data-assign="${esc(o.id)}">Assigner</button></td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="7">Aucune commande</td></tr>`;
+}
+
+async function load() {
+  try {
+    if (!base || !key || key.startsWith("REMPLACER")) throw new Error("config.js : renseigne SUPABASE_URL et SUPABASE_KEY.");
+    const [r, o] = await Promise.all([
+      api("riders?select=*&order=name.asc"),
+      api("orders?select=*&order=created_at.desc"),
+    ]);
+    riders = r || [];
+    orders = o || [];
+    setStatus("on", "connecté à Supabase");
+    errorEl.textContent = "";
+    render();
+  } catch (e) {
+    setStatus("err", "erreur");
+    errorEl.textContent = "Erreur : " + e.message;
+  }
+}
+
+document.getElementById("orders").addEventListener("click", async (ev) => {
+  const btn = ev.target.closest("button[data-assign]");
+  if (!btn) return;
+  const id = btn.getAttribute("data-assign");
+  const sel = document.querySelector('select[data-order="' + CSS.escape(id) + '"]');
+  const riderId = sel ? sel.value : "";
+  if (!riderId) { errorEl.textContent = "Choisis un livreur."; return; }
+  btn.disabled = true;
+  try {
+    await api("orders?id=eq." + encodeURIComponent(id), {
+      method: "PATCH",
+      body: JSON.stringify({ rider_id: riderId, status: "assigned" }),
+    });
+    errorEl.textContent = "";
+    await load();
+  } catch (e) {
+    errorEl.textContent = "Erreur : " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+load();
+</script>
+</body>
+</html>
